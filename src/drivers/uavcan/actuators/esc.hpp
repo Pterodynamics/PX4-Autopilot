@@ -46,11 +46,14 @@
 
 #include <uavcan/uavcan.hpp>
 #include <uavcan/equipment/esc/RawCommand.hpp>
+#include <uavcan/equipment/esc/RPMCommand.hpp>
 #include <uavcan/equipment/esc/Status.hpp>
+#include <uavcan/equipment/esc/StatusExtended.hpp>
 #include <lib/perf/perf_counter.h>
 #include <uORB/PublicationMulti.hpp>
 #include <uORB/topics/actuator_outputs.h>
 #include <uORB/topics/esc_status.h>
+#include <uORB/topics/mavlink_tunnel.h>
 #include <drivers/drv_hrt.h>
 #include <lib/mixer_module/mixer_module.hpp>
 #include <parameters/param.h>
@@ -73,6 +76,10 @@ public:
 
 	void update_outputs(uint16_t outputs[MAX_ACTUATORS], unsigned total_outputs);
 
+	// void send_rpm_command(int32_t* rpm_values);
+
+	void set_rpm_command(uint8_t esc_index, int32_t rpm_value);
+
 	/**
 	 * Sets the number of rotors and enable timer
 	 */
@@ -82,11 +89,20 @@ public:
 
 	esc_status_s &esc_status() { return _esc_status; }
 
+	mavlink_tunnel_s &esc_status_extended() { return _esc_status_extended; }
+
+	void reset_esc_status_extended_payload();
+
 private:
 	/**
 	 * ESC status message reception will be reported via this callback.
 	 */
 	void esc_status_sub_cb(const uavcan::ReceivedDataStructure<uavcan::equipment::esc::Status> &msg);
+
+	/**
+	 * ESC status_extended message reception reported via the below callback.
+	 */
+	void esc_status_extended_sub_cb(const uavcan::ReceivedDataStructure<uavcan::equipment::esc::StatusExtended> &msg);
 
 	/**
 	 * Checks all the ESCs freshness based on timestamp, if an ESC exceeds the timeout then is flagged offline.
@@ -97,23 +113,47 @@ private:
 		void (UavcanEscController::*)(const uavcan::ReceivedDataStructure<uavcan::equipment::esc::Status>&)> StatusCbBinder;
 
 	typedef uavcan::MethodBinder<UavcanEscController *,
+		void (UavcanEscController::*)(const uavcan::ReceivedDataStructure<uavcan::equipment::esc::StatusExtended>&)> StatusExtendedCbBinder;
+
+	typedef uavcan::MethodBinder<UavcanEscController *,
 		void (UavcanEscController::*)(const uavcan::TimerEvent &)> TimerCbBinder;
 
 	bool _initialized{};
 
 	esc_status_s	_esc_status{};
 
+	mavlink_tunnel_s	_esc_status_extended{};
+
+	static constexpr uint16_t ESC_STATUS_EXTENDED_PAYLOAD_TYPE =  32805;
+
+	// In the TUNNEL payload, each value will be stored byte-aligned. If link budget is constrained or someone is sufficiently motivated,
+	// this could be condensed to 7 bytes through bit packing similar to DroneCAN.
+	static constexpr uint8_t STATUS_EXTENDED_BYTES_PER_ESC = 10; // uint7, uint7, int9, uint9, uint19, uint5
+
+	static constexpr uint8_t  ESC_STATUS_EXTENDED_UNKNOWN_PCT          = 0xFF;      // valid range 0-100
+	static constexpr int16_t  ESC_STATUS_EXTENDED_UNKNOWN_TEMPERATURE  = 0x7FFF;    // valid range -256..255
+	static constexpr uint16_t ESC_STATUS_EXTENDED_UNKNOWN_ANGLE        = 0xFFFF;    // valid range 0..360
+	static constexpr uint32_t ESC_STATUS_EXTENDED_UNKNOWN_STATUS_FLAGS = 0xFFFFFFu; // May actually conflict with manufacturer status flags...this byte alone does not indicate a lack of reception.
+
 	uORB::PublicationMulti<esc_status_s> _esc_status_pub{ORB_ID(esc_status)};
 
+	uORB::PublicationMulti<mavlink_tunnel_s> _esc_status_extended_pub{ORB_ID(mavlink_tunnel)};
+
+	static_assert(MAX_ACTUATORS * STATUS_EXTENDED_BYTES_PER_ESC <= sizeof(_esc_status_extended.payload), "StatusExtended tunnel payload larger than expected.");
+
 	uint8_t		_rotor_count{0};
+
+	int32_t _last_rpm_command[MAX_ACTUATORS] {}; // Persists the last set of RPM values commanded to each ESC, so that commanding one ESC doesn't reset others to 0.
 
 	/*
 	 * libuavcan related things
 	 */
-	uavcan::MonotonicTime							_prev_cmd_pub;   ///< rate limiting
-	uavcan::INode								&_node;
-	uavcan::Publisher<uavcan::equipment::esc::RawCommand>			_uavcan_pub_raw_cmd;
-	uavcan::Subscriber<uavcan::equipment::esc::Status, StatusCbBinder>	_uavcan_sub_status;
+	uavcan::MonotonicTime									_prev_cmd_pub;   ///< rate limiting
+	uavcan::INode										&_node;
+	uavcan::Publisher<uavcan::equipment::esc::RawCommand>					_uavcan_pub_raw_cmd;
+	uavcan::Publisher<uavcan::equipment::esc::RPMCommand>					_uavcan_pub_rpm_cmd;
+	uavcan::Subscriber<uavcan::equipment::esc::Status, StatusCbBinder>			_uavcan_sub_status;
+	uavcan::Subscriber<uavcan::equipment::esc::StatusExtended, StatusExtendedCbBinder>	_uavcan_ext_sub_status;
 
 
 	param_t _param_handles[MAX_ACTUATORS] {PARAM_INVALID};

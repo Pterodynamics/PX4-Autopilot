@@ -539,6 +539,12 @@ UavcanNode::init(uavcan::NodeID node_id, UAVCAN_DRIVER::BusEvent &bus_events)
 		if (ret < 0) {
 			return ret;
 		}
+
+		ret = _servo_controller.init();
+
+		if (ret < 0) {
+			return ret;
+		}
 	}
 
 #endif
@@ -949,6 +955,26 @@ UavcanNode::Run()
 					param_opcode(get_next_dirty_node_id(1));
 					break;
 				}
+			}
+		}
+
+		if (cmd.command == MAV_CMD_USER_1) {
+			// Bench testing only: sets one ESC's RPM setpoint using DroneCAN RPMCommand
+			// via UavcanEscController::set_rpm_command(). Should not be used for normal
+			// flight control.
+			acknowledge = true;
+
+			uint8_t esc_index = static_cast<uint8_t>(roundf(cmd.param1));
+			int32_t rpm_value = static_cast<int32_t>(roundf(cmd.param2));
+
+			if (!_esc_controller.initialized()) {
+				PX4_ERR("RPM test command received before ESC initialized");
+				cmd_ack_result = vehicle_command_ack_s::VEHICLE_CMD_RESULT_TEMPORARILY_REJECTED;
+			} else if (esc_index >= UavcanEscController::MAX_ACTUATORS) {
+				PX4_ERR("RPM test command: esc_index (%u) out of range", esc_index);
+				cmd_ack_result = vehicle_command_ack_s::VEHICLE_CMD_RESULT_DENIED;
+			} else {
+				_esc_controller.set_rpm_command(esc_index, rpm_value);
 			}
 		}
 

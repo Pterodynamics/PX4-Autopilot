@@ -39,6 +39,7 @@
 #include <lib/perf/perf_counter.h>
 #include <uORB/PublicationMulti.hpp>
 #include <uORB/topics/actuator_outputs.h>
+#include <uORB/topics/mavlink_tunnel.h>
 #include <drivers/drv_hrt.h>
 #include <lib/mixer_module/mixer_module.hpp>
 
@@ -52,9 +53,41 @@ public:
 	UavcanServoController(uavcan::INode &node);
 	~UavcanServoController() = default;
 
+	int init();
+
+	bool initialized() { return _initialized; }
+
 	void update_outputs(uint16_t outputs[MAX_ACTUATORS], unsigned num_outputs);
 
+	mavlink_tunnel_s &actuator_status() { return _actuator_status; }
+
 private:
+	void actuator_status_sub_cb(const uavcan::ReceivedDataStructure<uavcan::equipment::actuator::Status> &msg);
+
+	// Fills ever actuator slot's position/force/speed with float16 NaN and power_rating_pct with POWER_RATING_PCT_UNKNOWN from DSDL spec.
+	void reset_payload_to_unknown();
+
+	typedef uavcan::MethodBinder<UavcanServoController *,
+		void (UavcanServoController::*)(const uavcan::ReceivedDataStructure<uavcan::equipment::actuator::Status>&)> StatusCbBinder;
+
+	bool _initialized{};
+
+	mavlink_tunnel_s _actuator_status{};
+
+	// mavlink_tunnel_s _actuator_status[MAX_ACTUATORS]{};
+
+	static constexpr uint16_t ACTUATOR_STATUS_PAYLOAD_TYPE = 32806;
+	static constexpr uint8_t ACTUATOR_STATUS_BYTES_PER_ACTUATOR = 8;
+	static constexpr uint8_t ACTUATOR_STATUS_PAYLOAD_LENGTH = ACTUATOR_STATUS_BYTES_PER_ACTUATOR * MAX_ACTUATORS;
+
+	static_assert(ACTUATOR_STATUS_PAYLOAD_LENGTH <= sizeof(_actuator_status.payload),
+			"Too many actuators to fit status telemetry into a single TUNNEL message.");
+
 	uavcan::INode								&_node;
 	uavcan::Publisher<uavcan::equipment::actuator::ArrayCommand> _uavcan_pub_array_cmd;
+	uORB::PublicationMulti<mavlink_tunnel_s> _actuator_status_pub{ORB_ID(mavlink_tunnel)};
+	uavcan::Subscriber<uavcan::equipment::actuator::Status, StatusCbBinder> _uavcan_sub_status;
+
+	// typedef uavcan::MethodBinder<UavcanServoController *,
+	// 	void (UavcanServoController::*)(const uavcan::ReceivedDataStructure<uavcan::equipment::actuator::Status>&)> StatusServoBinder;
 };

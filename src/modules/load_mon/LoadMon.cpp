@@ -280,6 +280,7 @@ void LoadMon::stack_usage()
 				}
 			}
 		}
+		(void) tcb_num_used_fds; // FIXME: Dead code
 
 #endif // CONFIG_NFILE_DESCRIPTORS_PER_BLOCK
 	}

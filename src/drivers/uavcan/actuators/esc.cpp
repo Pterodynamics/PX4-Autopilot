@@ -50,9 +50,12 @@ using namespace time_literals;
 UavcanEscController::UavcanEscController(uavcan::INode &node) :
 	_node(node),
 	_uavcan_pub_raw_cmd(node),
-	_uavcan_sub_status(node)
+	_uavcan_pub_rpm_cmd(node),
+	_uavcan_sub_status(node),
+	_uavcan_ext_sub_status(node)
 {
 	_uavcan_pub_raw_cmd.setPriority(uavcan::TransferPriority::NumericallyMin); // Highest priority
+	reset_esc_status_extended_payload();
 }
 
 int
@@ -67,6 +70,15 @@ UavcanEscController::init()
 	}
 
 	_esc_status_pub.advertise();
+
+	res = _uavcan_ext_sub_status.start(StatusExtendedCbBinder(this, &UavcanEscController::esc_status_extended_sub_cb));
+
+	if (res < 0) {
+		PX4_ERR("ESC StatusExtended sub failed %i", res);
+		return res;
+	}
+
+	_esc_status_extended_pub.advertise();
 
 	int32_t iface_mask{0xFF};
 
@@ -123,6 +135,55 @@ UavcanEscController::update_outputs(uint16_t outputs[MAX_ACTUATORS], unsigned to
 	_uavcan_pub_raw_cmd.broadcast(msg);
 }
 
+// void
+// UavcanEscController::send_rpm_command(const int32_t* rpm_values)
+// {
+// 	uint8_t num_escs = static_cast<uint8_t>(rpm_values.size());
+// 	if (num_escs > MAX_ACTUATORS) {
+// 		PX4_ERR("send_rpm_command: num_escs (%u) exceeds MAX_ACTUATORS (%d)", num_escs, MAX_ACTUATORS);
+// 		return;
+// 	}
+
+// 	uavcan::equipment::esc::RPMCommand msg = {};
+
+// 	// DroneCAN RPMCommand.rpm is a flat array of rpm values (array position == esc index).
+// 	// Positions before esc_index have their RPM set to zero.
+
+// 	for (uint8_t i = 0; i <= num_escs; i++) {
+// 		msg.rpm.push_back(rpm_values[i]); // msg.rpm can be any length up to 20.
+// 	}
+
+// 	_uavcan_pub_rpm_cmd.broadcast(msg);
+// }
+
+void
+UavcanEscController::set_rpm_command(uint8_t esc_index, int32_t rpm_value)
+{
+	if (esc_index >= MAX_ACTUATORS) {
+		PX4_ERR("send_rpm_command: esc_index (%u) exceeds MAX_ACTUATORS (%d)", esc_index, MAX_ACTUATORS);
+		return;
+	}
+
+	const auto timestamp = _node.getMonotonicTime();
+
+	if ((timestamp - _prev_cmd_pub).toUSec() < (1000000 / MAX_RATE_HZ)) {
+		return;
+	}
+
+	_prev_cmd_pub = timestamp;
+
+	_last_rpm_command[esc_index] = rpm_value;
+
+	uavcan::equipment::esc::RPMCommand msg = {};
+	msg.rpm.resize(MAX_ACTUATORS);
+
+	for (uint8_t i = 0; i < MAX_ACTUATORS; i++) {
+		msg.rpm[i] = _last_rpm_command[i]; // msg.rpm can be any length up to 20.
+	}
+
+	_uavcan_pub_rpm_cmd.broadcast(msg);
+}
+
 void
 UavcanEscController::set_rotor_count(uint8_t count)
 {
@@ -150,6 +211,68 @@ UavcanEscController::esc_status_sub_cb(const uavcan::ReceivedDataStructure<uavca
 		_esc_status.esc_armed_flags = (1 << _rotor_count) - 1;
 		_esc_status.timestamp = hrt_absolute_time();
 		_esc_status_pub.publish(_esc_status);
+	}
+}
+
+void
+UavcanEscController::reset_esc_status_extended_payload()
+{
+	for (uint8_t id = 0; id < MAX_ACTUATORS; id++) {
+		size_t offset = static_cast<size_t>(id) * STATUS_EXTENDED_BYTES_PER_ESC;
+		uint8_t *payload = _esc_status_extended.payload;
+
+		payload[offset++] = ESC_STATUS_EXTENDED_UNKNOWN_PCT; // input_pct
+		payload[offset++] = ESC_STATUS_EXTENDED_UNKNOWN_PCT; // output_pct
+
+		payload[offset++] = static_cast<uint8_t>(ESC_STATUS_EXTENDED_UNKNOWN_TEMPERATURE & 0xFF); // motor temp
+		payload[offset++] = static_cast<uint8_t>((ESC_STATUS_EXTENDED_UNKNOWN_TEMPERATURE >> 8) & 0xFF);
+
+		payload[offset++] = static_cast<uint8_t>(ESC_STATUS_EXTENDED_UNKNOWN_ANGLE & 0xFF); // motor angle
+		payload[offset++] = static_cast<uint8_t>((ESC_STATUS_EXTENDED_UNKNOWN_ANGLE >> 8) & 0xFF);
+
+		payload[offset++] = static_cast<uint8_t>(ESC_STATUS_EXTENDED_UNKNOWN_STATUS_FLAGS & 0xFF); // Status flags. Could conflict with manufacturer status flags...
+		payload[offset++] = static_cast<uint8_t>((ESC_STATUS_EXTENDED_UNKNOWN_STATUS_FLAGS >> 8) & 0xFF);
+		payload[offset++] = static_cast<uint8_t>((ESC_STATUS_EXTENDED_UNKNOWN_STATUS_FLAGS >> 16) & 0xFF);
+
+		payload[offset++] = id;
+	}
+}
+
+void
+UavcanEscController::esc_status_extended_sub_cb(const uavcan::ReceivedDataStructure<uavcan::equipment::esc::StatusExtended> &msg)
+{
+	uint8_t esc_index = msg.esc_index;
+	if (esc_index < esc_status_s::CONNECTED_ESC_MAX) {
+		auto &ref = _esc_status_extended;
+
+		size_t offset = esc_index * STATUS_EXTENDED_BYTES_PER_ESC;
+		uint8_t *payload = _esc_status_extended.payload;
+
+		payload[offset++] = static_cast<uint8_t>(msg.input_pct);
+		payload[offset++] = static_cast<uint8_t>(msg.output_pct);
+
+		int16_t motor_temp = static_cast<int16_t>(msg.motor_temperature_degC);
+		payload[offset++] = static_cast<uint8_t>(motor_temp & 0xFF);
+		payload[offset++] = static_cast<uint8_t>((motor_temp >> 8) & 0xFF);
+
+		uint16_t motor_angle = static_cast<uint16_t>(msg.motor_angle);
+		payload[offset++] = static_cast<uint8_t>(motor_angle & 0xFF);
+		payload[offset++] = static_cast<uint8_t>((motor_angle >> 8) & 0xFF);
+
+		uint32_t status_flags = static_cast<uint32_t>(msg.status_flags);
+		payload[offset++] = static_cast<uint8_t>(status_flags & 0xFF);
+		payload[offset++] = static_cast<uint8_t>((status_flags >> 8) & 0xFF);
+		payload[offset++] = static_cast<uint8_t>((status_flags >> 16) & 0xFF);
+
+		payload[offset++] = esc_index;
+
+		_esc_status_extended.timestamp	    = hrt_absolute_time();
+		_esc_status_extended.payload_type    = ESC_STATUS_EXTENDED_PAYLOAD_TYPE;
+		_esc_status_extended.target_system   = 0; // Broadcast to everyone on the link -- no specific target system.
+		_esc_status_extended.target_component= 0; // Broadcast to everyone on the link
+		_esc_status_extended.payload_length  = STATUS_EXTENDED_BYTES_PER_ESC * _rotor_count;
+
+		_esc_status_extended_pub.publish(ref);
 	}
 }
 

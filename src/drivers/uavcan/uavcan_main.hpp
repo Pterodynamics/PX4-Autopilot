@@ -107,6 +107,8 @@
 #include <uORB/topics/uavcan_parameter_value.h>
 #include <uORB/topics/vehicle_command_ack.h>
 
+static constexpr uint16_t MAV_CMD_USER_1 = 31010;
+
 using namespace time_literals;
 
 class UavcanNode;

@@ -1,6 +1,6 @@
 /****************************************************************************
  *
- *   Copyright (c) 2013 PX4 Development Team. All rights reserved.
+ *   Copyright (c) 2021 PX4 Development Team. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -32,15 +32,10 @@
  ****************************************************************************/
 
 /**
- * @file comms.h
- * @author Simon Wilks <sjwilks@gmail.com>
+ * SHT4x temperature and hygrometer
  *
- */
-
-
-#ifndef COMMS_H_
-#define COMMS_H_
-
-__EXPORT int open_uart(const char *device);
-
-#endif /* COMMS_H_ */
+ * @reboot_required true
+ * @group Sensors
+ * @boolean
+  */
+PARAM_DEFINE_INT32(SENS_EN_SHT4X, 0);
