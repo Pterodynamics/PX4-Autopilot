@@ -46,7 +46,7 @@ constexpr uint8_t GYRO  = failure_injection_s::FAILURE_UNIT_SENSOR_GYRO;
 constexpr uint8_t GPS   = failure_injection_s::FAILURE_UNIT_SENSOR_GPS;
 constexpr uint8_t MOTOR = failure_injection_s::FAILURE_UNIT_SYSTEM_MOTOR;
 constexpr uint8_t ESC   = failure_injection_s::FAILURE_UNIT_SYSTEM_ESC;
-constexpr uint8_t CAN   = failure_injection_s::FAILURE_UNIT_SYSTEM_BUS_CAN;
+constexpr uint8_t CAN   = failure_injection_s::FAILURE_UNIT_BUS_CAN;
 
 constexpr uint8_t OK      = failure_injection_s::FAILURE_TYPE_OK;
 constexpr uint8_t OFF     = failure_injection_s::FAILURE_TYPE_OFF;
@@ -80,7 +80,8 @@ TEST(FailureTable, SupportedCatalogueMatchesInventory)
 	EXPECT_FALSE(FailureTable::isSupported(CAN, WRONG));
 	// Unimplemented units.
 	EXPECT_FALSE(FailureTable::isSupported(failure_injection_s::FAILURE_UNIT_SYSTEM_RC_SIGNAL, OFF));
-	EXPECT_FALSE(FailureTable::isSupported(failure_injection_s::FAILURE_UNIT_SYSTEM_BUS_I2C, OFF));
+	EXPECT_FALSE(FailureTable::isSupported(failure_injection_s::FAILURE_UNIT_BUS_I2C, OFF));
+	EXPECT_FALSE(FailureTable::isSupported(failure_injection_s::FAILURE_UNIT_DATALINK_LTE, OFF));
 }
 
 TEST(FailureTable, UnsupportedIsRejectedWithoutChange)
