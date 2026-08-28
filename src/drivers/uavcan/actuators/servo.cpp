@@ -34,6 +34,7 @@
 #include "servo.hpp"
 #include <systemlib/err.h>
 #include <drivers/drv_hrt.h>
+#include "float16_util.hpp"
 
 using namespace time_literals;
 
@@ -61,27 +62,6 @@ UavcanServoController::init()
 	_initialized = true;
 
 	return res;
-}
-
-static uint16_t float_to_float16_bits(float value)
-{
-	__fp16 half = value;
-
-	uint16_t bits;
-	static_assert(sizeof(bits) == sizeof(half), "__fp16 must be 16 bits on this target.");
-	memcpy(&bits, &half, sizeof(bits));
-
-	return bits;
-}
-
-static size_t pack_float16_le(uint8_t *payload, size_t offset, float value)
-{
-	uint16_t bits = float_to_float16_bits(value);
-
-	payload[offset++] = static_cast<uint8_t>(bits & 0xFF);
-	payload[offset++] = static_cast<uint8_t>((bits >> 8) & 0xFF);
-
-	return offset;
 }
 
 void

@@ -42,6 +42,7 @@
 #include <parameters/param.h>
 #include <drivers/drv_hrt.h>
 #include <lib/atmosphere/atmosphere.h>
+#include "float16_util.hpp"
 
 #define MOTOR_BIT(x) (1<<(x))
 
@@ -56,6 +57,7 @@ UavcanEscController::UavcanEscController(uavcan::INode &node) :
 {
 	_uavcan_pub_raw_cmd.setPriority(uavcan::TransferPriority::NumericallyMin); // Highest priority
 	reset_esc_status_extended_payload();
+	reset_esc_status_basic_payload();
 }
 
 int
@@ -135,26 +137,42 @@ UavcanEscController::update_outputs(uint16_t outputs[MAX_ACTUATORS], unsigned to
 	_uavcan_pub_raw_cmd.broadcast(msg);
 }
 
-// void
-// UavcanEscController::send_rpm_command(const int32_t* rpm_values)
-// {
-// 	uint8_t num_escs = static_cast<uint8_t>(rpm_values.size());
-// 	if (num_escs > MAX_ACTUATORS) {
-// 		PX4_ERR("send_rpm_command: num_escs (%u) exceeds MAX_ACTUATORS (%d)", num_escs, MAX_ACTUATORS);
-// 		return;
-// 	}
+static int32_t unpack_int24_le(const uint8_t *bytes)
+{
+	uint32_t raw = static_cast<uint32_t>(bytes[0])
+		     | (static_cast<uint32_t>(bytes[1]) << 8)
+		     | (static_cast<uint32_t>(bytes[2]) << 16);
 
-// 	uavcan::equipment::esc::RPMCommand msg = {};
+	if (raw & 0x800000u) {           // sign bit of the 24-bit value is set
+		raw |= 0xFF000000u;      // sign-extend into the top 8 bits of the uint32_t
+	}
 
-// 	// DroneCAN RPMCommand.rpm is a flat array of rpm values (array position == esc index).
-// 	// Positions before esc_index have their RPM set to zero.
+	return static_cast<int32_t>(raw);
+}
 
-// 	for (uint8_t i = 0; i <= num_escs; i++) {
-// 		msg.rpm.push_back(rpm_values[i]); // msg.rpm can be any length up to 20.
-// 	}
+void
+UavcanEscController::poll_rpm_tunnel_command()
+{
+	for (int i = 0; i < _rpm_tunnel_subs.size(); i++) {
+		mavlink_tunnel_s tunnel;
 
-// 	_uavcan_pub_rpm_cmd.broadcast(msg);
-// }
+		if (_rpm_tunnel_subs[i].update(&tunnel) && tunnel.payload_type == RPM_TUNNEL_PAYLOAD_TYPE) {
+			for (uint8_t esc_index = 0; esc_index < MAX_ACTUATORS; esc_index++) {
+				size_t offset = static_cast<size_t>(esc_index) * RPM_TUNNEL_RECORD_LENGTH;
+				_last_rpm_command[esc_index] = unpack_int24_le(&tunnel.payload[offset]);
+			}
+
+			uavcan::equipment::esc::RPMCommand msg = {};
+			msg.rpm.resize(MAX_ACTUATORS);
+
+			for (uint8_t i2 = 0; i2 < MAX_ACTUATORS; i2++) {
+				msg.rpm[i2] = _last_rpm_command[i2];
+			}
+
+			_uavcan_pub_rpm_cmd.broadcast(msg);
+		}
+	}
+}
 
 void
 UavcanEscController::set_rpm_command(uint8_t esc_index, int32_t rpm_value)
@@ -190,6 +208,22 @@ UavcanEscController::set_rotor_count(uint8_t count)
 	_rotor_count = count;
 }
 
+bool
+UavcanEscController::is_esc_mapped(uint8_t esc_index)
+{
+	if (esc_index >= MAX_ACTUATORS) {
+		return false;
+	}
+
+	int32_t val = 0;
+
+	// mirrors update_outputs()'s min_size loop. Failed fetch or non-positive
+	// value both mean "not mapped."
+	param_get(_param_handles[esc_index], &val);
+
+	return val > 0;
+}
+
 void
 UavcanEscController::esc_status_sub_cb(const uavcan::ReceivedDataStructure<uavcan::equipment::esc::Status> &msg)
 {
@@ -211,6 +245,74 @@ UavcanEscController::esc_status_sub_cb(const uavcan::ReceivedDataStructure<uavca
 		_esc_status.esc_armed_flags = (1 << _rotor_count) - 1;
 		_esc_status.timestamp = hrt_absolute_time();
 		_esc_status_pub.publish(_esc_status);
+
+		// Only forward this ESC's status message over TUNNEL if unmapped.
+		// Mapped ESCs are covered by ESC_STATUS MAVLink message with the
+		// above code.
+		if (!is_esc_mapped(msg.esc_index)) {
+			uint8_t esc_index = msg.esc_index;
+
+			size_t offset = static_cast<size_t>(esc_index) * ESC_STATUS_BASIC_BYTES_PER_ESC;
+			uint8_t *payload = _esc_status_basic.payload;
+
+			uint32_t error_count = static_cast<uint32_t>(msg.error_count);
+			payload[offset++] = static_cast<uint8_t>(error_count & 0xFF);
+			payload[offset++] = static_cast<uint8_t>((error_count >> 8) & 0xFF);
+			payload[offset++] = static_cast<uint8_t>((error_count >> 16) & 0xFF);
+			payload[offset++] = static_cast<uint8_t>((error_count >> 24) & 0xFF);
+
+			offset = pack_float16_le(payload, offset, static_cast<float>(msg.voltage));
+
+			offset = pack_float16_le(payload, offset, static_cast<float>(msg.current));
+
+			offset = pack_float16_le(payload, offset, static_cast<float>(msg.temperature));
+
+			int32_t rpm = static_cast<int32_t>(msg.rpm);
+			payload[offset++] = static_cast<uint8_t>(rpm & 0xFF);
+			payload[offset++] = static_cast<uint8_t>((rpm >> 8) & 0xFF);
+			payload[offset++] = static_cast<uint8_t>((rpm >> 16) & 0xFF);
+
+			uint8_t power_rating_pct = static_cast<uint8_t>(msg.power_rating_pct);
+			payload[offset++] = power_rating_pct;
+
+			payload[offset++] = esc_index;
+
+			_esc_status_basic.timestamp        = hrt_absolute_time();
+			_esc_status_basic.payload_type     = ESC_STATUS_BASIC_PAYLOAD_TYPE;
+			_esc_status_basic.target_system    = 0;
+			_esc_status_basic.target_component = 0;
+			_esc_status_basic.payload_length   = ESC_STATUS_BASIC_BYTES_PER_ESC * _rotor_count;
+
+			_esc_status_basic_pub.publish(_esc_status_basic);
+		}
+	}
+}
+
+void
+UavcanEscController::reset_esc_status_basic_payload()
+{
+	for (uint8_t id = 0; id < MAX_ACTUATORS; id++) {
+		size_t offset = static_cast<size_t>(id) * ESC_STATUS_BASIC_BYTES_PER_ESC;
+		uint8_t *payload = _esc_status_basic.payload;
+		uint16_t nan_bits = float_to_float16_bits(__builtin_nanf(""));
+
+		payload[offset++] = static_cast<uint8_t>(ESC_STATUS_BASIC_UNKNOWN_ERRORCOUNT & 0xFF);
+		payload[offset++] = static_cast<uint8_t>((ESC_STATUS_BASIC_UNKNOWN_ERRORCOUNT >> 8) & 0xFF);
+		payload[offset++] = static_cast<uint8_t>((ESC_STATUS_BASIC_UNKNOWN_ERRORCOUNT >> 16) & 0xFF);
+		payload[offset++] = static_cast<uint8_t>((ESC_STATUS_BASIC_UNKNOWN_ERRORCOUNT >> 24) & 0xFF);
+
+		// voltage, current, temperature set to NaN
+		for (int i = 0; i < 3; i++) {
+			offset = pack_float16_le(payload, offset, nan_bits);
+		}
+
+		payload[offset++] = static_cast<uint8_t>(ESC_STATUS_BASIC_UNKNOWN_RPM & 0xFF);
+		payload[offset++] = static_cast<uint8_t>((ESC_STATUS_BASIC_UNKNOWN_RPM >> 8) & 0xFF);
+		payload[offset++] = static_cast<uint8_t>((ESC_STATUS_BASIC_UNKNOWN_RPM >> 16) & 0xFF);
+
+		payload[offset++] = static_cast<uint8_t>(ESC_STATUS_BASIC_UNKNOWN_POWER_RATING_PCT & 0xFF);
+
+		payload[offset++] = id;
 	}
 }
 

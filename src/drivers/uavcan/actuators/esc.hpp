@@ -54,6 +54,7 @@
 #include <uORB/topics/actuator_outputs.h>
 #include <uORB/topics/esc_status.h>
 #include <uORB/topics/mavlink_tunnel.h>
+#include <uORB/SubscriptionMultiArray.hpp>
 #include <drivers/drv_hrt.h>
 #include <lib/mixer_module/mixer_module.hpp>
 #include <parameters/param.h>
@@ -67,6 +68,7 @@ public:
 	static_assert(uavcan::equipment::esc::RawCommand::FieldTypes::cmd::MaxSize >= MAX_ACTUATORS, "Too many actuators");
 
 
+
 	UavcanEscController(uavcan::INode &node);
 	~UavcanEscController() = default;
 
@@ -78,10 +80,13 @@ public:
 
 	// void send_rpm_command(int32_t* rpm_values);
 
-	void set_rpm_command(uint8_t esc_index, int32_t rpm_value);
+	/**
+	 * RPM TUNNEL commands received through this.
+	 */
+	void poll_rpm_tunnel_command();
 
 	/**
-	 * Sets the number of rotors and enable timer
+	 * Set the number of rotors and enable timer
 	 */
 	void set_rotor_count(uint8_t count);
 
@@ -89,18 +94,27 @@ public:
 
 	esc_status_s &esc_status() { return _esc_status; }
 
+	// TUNNEL message to transmit ESC_STATUS equivalent for unmapped motors. Used for thrust stand data collection.
+	mavlink_tunnel_s &esc_status_basic() {return _esc_status_basic; }
+
+	// TUNNEL message for transmitting esc.StatusExtended messages to companion computer.
 	mavlink_tunnel_s &esc_status_extended() { return _esc_status_extended; }
+
+	void reset_esc_status_basic_payload();
 
 	void reset_esc_status_extended_payload();
 
 private:
+	// Send RPM command FOR THRUST STAND TESTING ONLY. Will only work on unmapped motors (no UAVCAN_EC_FUNCn assigned)
+	void set_rpm_command(uint8_t esc_index, int32_t rpm_value);
+
 	/**
 	 * ESC status message reception will be reported via this callback.
 	 */
 	void esc_status_sub_cb(const uavcan::ReceivedDataStructure<uavcan::equipment::esc::Status> &msg);
 
 	/**
-	 * ESC status_extended message reception reported via the below callback.
+	 * ESC StatusExtended message reception reported via this callback.
 	 */
 	void esc_status_extended_sub_cb(const uavcan::ReceivedDataStructure<uavcan::equipment::esc::StatusExtended> &msg);
 
@@ -108,6 +122,12 @@ private:
 	 * Checks all the ESCs freshness based on timestamp, if an ESC exceeds the timeout then is flagged offline.
 	 */
 	uint8_t check_escs_status();
+
+	/**
+	 * Checks if an ESC is mapped (UAVCAN_EC_FUNCn is not "disabled")
+	 */
+	bool is_esc_mapped(uint8_t count);
+
 
 	typedef uavcan::MethodBinder<UavcanEscController *,
 		void (UavcanEscController::*)(const uavcan::ReceivedDataStructure<uavcan::equipment::esc::Status>&)> StatusCbBinder;
@@ -122,9 +142,13 @@ private:
 
 	esc_status_s	_esc_status{};
 
+	mavlink_tunnel_s	_esc_status_basic{};
 	mavlink_tunnel_s	_esc_status_extended{};
 
-	static constexpr uint16_t ESC_STATUS_EXTENDED_PAYLOAD_TYPE =  32805;
+	static constexpr uint16_t ESC_STATUS_EXTENDED_PAYLOAD_TYPE = 32805;
+	static constexpr uint16_t ESC_STATUS_BASIC_PAYLOAD_TYPE = 32804;
+	static constexpr uint16_t RPM_TUNNEL_PAYLOAD_TYPE = 32807;
+	static constexpr uint8_t RPM_TUNNEL_RECORD_LENGTH = 3;
 
 	// In the TUNNEL payload, each value will be stored byte-aligned. If link budget is constrained or someone is sufficiently motivated,
 	// this could be condensed to 7 bytes through bit packing similar to DroneCAN.
@@ -135,9 +159,18 @@ private:
 	static constexpr uint16_t ESC_STATUS_EXTENDED_UNKNOWN_ANGLE        = 0xFFFF;    // valid range 0..360
 	static constexpr uint32_t ESC_STATUS_EXTENDED_UNKNOWN_STATUS_FLAGS = 0xFFFFFFu; // May actually conflict with manufacturer status flags...this byte alone does not indicate a lack of reception.
 
+	static constexpr uint8_t ESC_STATUS_BASIC_BYTES_PER_ESC = 15;
+
+	static constexpr int32_t ESC_STATUS_BASIC_UNKNOWN_RPM = 0x7FFFFF;
+	static constexpr uint32_t ESC_STATUS_BASIC_UNKNOWN_ERRORCOUNT = 0xFFFFFFFF;
+	static constexpr uint8_t ESC_STATUS_BASIC_UNKNOWN_POWER_RATING_PCT = 0x7F;
+
 	uORB::PublicationMulti<esc_status_s> _esc_status_pub{ORB_ID(esc_status)};
 
+	uORB::PublicationMulti<mavlink_tunnel_s> _esc_status_basic_pub{ORB_ID(mavlink_tunnel)};
 	uORB::PublicationMulti<mavlink_tunnel_s> _esc_status_extended_pub{ORB_ID(mavlink_tunnel)};
+
+	uORB::SubscriptionMultiArray<mavlink_tunnel_s> _rpm_tunnel_subs{ORB_ID::mavlink_tunnel};
 
 	static_assert(MAX_ACTUATORS * STATUS_EXTENDED_BYTES_PER_ESC <= sizeof(_esc_status_extended.payload), "StatusExtended tunnel payload larger than expected.");
 
